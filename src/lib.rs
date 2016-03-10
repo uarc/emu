@@ -3,7 +3,7 @@ use std::io::Read;
 /// Core is a trait that defines the standard UARC bus interface with a core for emulation purposes.
 /// Interacting with the core is synchronous and thread-safe. Beware of deadlock.
 ///
-/// W is a word type for passing information along the bus
+/// W is a word type for passing information along the bus.
 pub trait Core<W> {
     /// The privilege/address is for the core sending.
     fn stream<R: Read>(&mut self, privilege: u8, address: u32, src: &mut R);
