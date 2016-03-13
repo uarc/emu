@@ -1,5 +1,7 @@
 use std::io::Read;
 
+pub mod core0;
+
 /// Core is a trait that defines the standard UARC bus interface with a core for emulation purposes.
 /// Interacting with the core is synchronous and thread-safe. Beware of deadlock.
 ///
