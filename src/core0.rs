@@ -1,17 +1,10 @@
-extern crate nue;
 extern crate num;
-use super::{Core, SenderBus, ReceiverBus, make_bus};
-use std::io::Read;
-use std::sync::{Mutex, Arc, Barrier};
+use super::{Com, Core, SenderBus, Permission};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::ops::Deref;
 
-struct InBus<W> {
-    bus: ReceiverBus<W>,
-}
-
-struct OutBus<W> {
-    bus: SenderBus<W>,
+struct Bus<W> {
+    sender: SenderBus<W>,
+    selected: bool,
 }
 
 #[derive(Default)]
@@ -19,11 +12,18 @@ struct DStack<W> {
     stack: Vec<W>,
 }
 
-impl<W> DStack<W> {
+impl<W> DStack<W> where W: Copy {
     fn rotate(&mut self, pos: u8) {
         let last = self.stack.len() - 1;
         // TODO: Introduce debug on out of range
         let v = self.stack.remove(last - pos as usize);
+        self.stack.push(v);
+    }
+
+    fn copy(&mut self, pos: u8) {
+        let last = self.stack.len() - 1;
+        // TODO: Introduce debug on out of range
+        let v = self.stack[last - pos as usize];
         self.stack.push(v);
     }
 
@@ -32,7 +32,7 @@ impl<W> DStack<W> {
             Some(v) => v,
             None => {
                 // TODO: Add proper debugging here
-                panic!("No value on stack to consume");
+                panic!("core0: Attempted to consume a value when none was available.");
             },
         };
 
@@ -50,13 +50,18 @@ pub struct Core0<W> {
     program: Vec<u8>,
     data: Vec<W>,
 
-    // Incoming buses
-    incoming_buses: Vec<InBus<W>>,
-    outgoing_buses: Vec<OutBus<W>>,
+    // Buses including senders
+    buses: Vec<Bus<W>>,
 
-    // Synchronization for receiving interrupts
-    interrupt_sender: Mutex<SyncSender<(W, Arc<Barrier>)>>,
-    interrupt_receiver: Receiver<(W, Arc<Barrier>)>,
+    // Incoming streams
+    incoming_streams: Vec<Receiver<Com<Receiver<W>>>>,
+
+    // The channel that must be used to incept this core
+    incept_channel: (SyncSender<Com<(Permission, Receiver<W>)>>, Receiver<Com<(Permission, Receiver<W>)>>),
+    // The channel that must be used to send interrupts to this core
+    send_channel: (SyncSender<Com<W>>, Receiver<Com<W>>),
+    // The channel that must be used to kill this core
+    kill_channel: (SyncSender<Com<()>>, Receiver<Com<()>>),
 
     // Set up stack
     dstack: DStack<W>,
@@ -64,7 +69,6 @@ pub struct Core0<W> {
 
 impl Core0<u32> {
     fn new(memory: usize) -> Self {
-        let (sender, receiver) = sync_channel(0);
         Core0{
             running: false,
             pc: 0,
@@ -75,11 +79,12 @@ impl Core0<u32> {
             program: Vec::new(),
             data: vec![0; memory],
 
-            incoming_buses: Vec::new(),
-            outgoing_buses: Vec::new(),
+            incoming_streams: Vec::new(),
+            buses: Vec::new(),
 
-            interrupt_sender: Mutex::new(sender),
-            interrupt_receiver: receiver,
+            incept_channel: sync_channel(0),
+            send_channel: sync_channel(0),
+            kill_channel: sync_channel(0),
 
             dstack: DStack::default(),
         }
@@ -89,37 +94,56 @@ impl Core0<u32> {
 impl<W> Core<W> for Core0<W>
     where W: Copy + num::Integer, usize: From<W>
 {
-    fn append_buses<I>(&mut self, buses: I) where I: Iterator<Item=SenderBus<W>> {
-
+    fn append_sender(&mut self, sender: SenderBus<W>) {
+        self.buses.push(Bus{
+            sender: sender,
+            selected: false,
+        });
     }
 
-    fn aquire_bus(&mut self, index: usize) -> SenderBus<W> {
-        let buses = make_bus();
-        self.incoming_buses.push(InBus{
-            bus: buses.1
-        });
-        buses.0
+    fn aquire_sender(&mut self) -> SenderBus<W> {
+        let stream_channel = sync_channel(0);
+        self.incoming_streams.push(stream_channel.1);
+        SenderBus{
+            bus: self.incoming_streams.len() - 1,
+            stream: stream_channel.0,
+            incept: self.incept_channel.0.clone(),
+            send: self.send_channel.0.clone(),
+            kill: self.kill_channel.0.clone(),
+        }
     }
 
     fn begin(&mut self) {
+        assert_eq!(self.incoming_streams.len(), self.buses.len());
         // Get disjoint references so borrows can occur simultaneously
         let dstack = &mut self.dstack;
         let data = &mut self.data;
         let prog = &mut self.program;
         let pc = &mut self.pc;
         let dcs = &mut self.dcs;
-        // Poll for any sort of communication
 
-        // Execute instruction
-        match prog[usize::from(*pc)] {
-            // rread#
-            x @ 0...3 => {
-                dstack.replace(|v| {
-                    data[usize::from(dcs[x as usize] + v)]
-                });
-            },
-            // TODO: Add all instructions
-            _ => {},
+        // Repeat loop of reinception perpetually
+        loop {
+            // Accept inception
+            // TODO: Implement
+
+            // Run until core is killed
+            loop {
+                // Poll for any sort of communication
+                // TODO: Implement
+
+                // Execute instruction
+                match prog[usize::from(*pc)] {
+                    // rread#
+                    x @ 0...3 => {
+                        dstack.replace(|v| {
+                            data[usize::from(dcs[x as usize] + v)]
+                        });
+                    },
+                    // TODO: Add all instructions
+                    _ => {},
+                }
+            }
         }
     }
 }
