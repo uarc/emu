@@ -1,4 +1,5 @@
 extern crate num;
+extern crate nue;
 use super::{Com, Core, SenderBus, Permission};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
@@ -41,6 +42,7 @@ impl<W> DStack<W> where W: Copy {
 }
 
 pub struct Core0<W> {
+    permission: Permission,
     running: bool,
     pc: W,
     dcs: [W; 4],
@@ -70,6 +72,7 @@ pub struct Core0<W> {
 impl Core0<u32> {
     fn new(memory: usize) -> Self {
         Core0{
+            permission: Permission::default(),
             running: false,
             pc: 0,
             dcs: [0; 4],
@@ -92,7 +95,7 @@ impl Core0<u32> {
 }
 
 impl<W> Core<W> for Core0<W>
-    where W: Copy + num::Integer, usize: From<W>
+    where W: Copy + num::Integer + nue::Pod, usize: From<W>
 {
     fn append_sender(&mut self, sender: SenderBus<W>) {
         self.buses.push(Bus{
@@ -121,11 +124,26 @@ impl<W> Core<W> for Core0<W>
         let prog = &mut self.program;
         let pc = &mut self.pc;
         let dcs = &mut self.dcs;
+        let permission = &mut self.permission;
 
         // Repeat loop of reinception perpetually
         loop {
             // Accept inception
             // TODO: Implement
+            {
+                let com = match self.incept_channel.1.recv() {
+                    Ok(v) => v,
+                    Err(_) => panic!("core0: Inception channel broken"),
+                };
+
+                *permission = com.data.0;
+                let receiver = com.data.1;
+                // Clear any previous program before loading the new one
+                prog.clear();
+                while let Ok(v) = receiver.recv() {
+                    prog.extend_from_slice(v.as_slice());
+                }
+            }
 
             // Run until core is killed
             loop {

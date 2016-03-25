@@ -3,6 +3,7 @@ use std::sync::mpsc::{SyncSender, Receiver};
 
 pub mod core0;
 
+#[derive(Default)]
 pub struct Permission {
     privilege: u8,
     address: u32,
