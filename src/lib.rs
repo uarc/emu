@@ -1,5 +1,6 @@
 extern crate oncemutex as om;
 use std::sync::mpsc::{SyncSender, Receiver};
+use std::io::Read;
 
 pub mod core0;
 
@@ -30,9 +31,9 @@ pub struct SenderBus<W> {
     // Associated bus ID we must send to the receiver
     pub bus: usize,
     // Send a stream to the target
-    pub stream: SyncSender<Com<Receiver<W>>>,
+    pub stream: SyncSender<Com<Box<Read>>>,
     // Incept the target
-    pub incept: SyncSender<Com<(Permission, Receiver<W>)>>,
+    pub incept: SyncSender<Com<(Permission, Box<Read>)>>,
     // Interrupt a target with a word
     pub send: SyncSender<Com<W>>,
     // Kill the target
@@ -41,12 +42,12 @@ pub struct SenderBus<W> {
 
 impl<W> SenderBus<W> {
     /// Send a channel to the target
-    fn stream(&self, permission: Permission, data: Receiver<W>) {
+    fn stream(&self, permission: Permission, data: Box<Read>) {
         self.stream.send(Com::new(permission, self.bus, data)).ok().unwrap();
     }
 
     /// Send a channel and a fresh set of permissions to incept a core
-    fn incept(&self, permission: Permission, target_permission: Permission, instructions: Receiver<W>) {
+    fn incept(&self, permission: Permission, target_permission: Permission, instructions: Box<Read>) {
         self.incept.send(Com::new(permission, self.bus, (target_permission, instructions))).ok().unwrap();
     }
 

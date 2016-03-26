@@ -2,6 +2,7 @@ extern crate num;
 extern crate nue;
 use super::{Com, Core, SenderBus, Permission};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::io::Read;
 
 struct Bus<W> {
     sender: SenderBus<W>,
@@ -56,10 +57,10 @@ pub struct Core0<W> {
     buses: Vec<Bus<W>>,
 
     // Incoming streams
-    incoming_streams: Vec<Receiver<Com<Receiver<W>>>>,
+    incoming_streams: Vec<Receiver<Com<Box<Read>>>>,
 
     // The channel that must be used to incept this core
-    incept_channel: (SyncSender<Com<(Permission, Receiver<W>)>>, Receiver<Com<(Permission, Receiver<W>)>>),
+    incept_channel: (SyncSender<Com<(Permission, Box<Read>)>>, Receiver<Com<(Permission, Box<Read>)>>),
     // The channel that must be used to send interrupts to this core
     send_channel: (SyncSender<Com<W>>, Receiver<Com<W>>),
     // The channel that must be used to kill this core
@@ -95,7 +96,7 @@ impl Core0<u32> {
 }
 
 impl<W> Core<W> for Core0<W>
-    where W: Copy + num::Integer + nue::Pod, usize: From<W>
+    where W: Copy + num::PrimInt + num::Signed + nue::Decode + nue::Encode, usize: From<W>
 {
     fn append_sender(&mut self, sender: SenderBus<W>) {
         self.buses.push(Bus{
@@ -125,6 +126,8 @@ impl<W> Core<W> for Core0<W>
         let pc = &mut self.pc;
         let dcs = &mut self.dcs;
         let permission = &mut self.permission;
+        let carry = &mut self.carry;
+        let overflow = &mut self.overflow;
 
         // Repeat loop of reinception perpetually
         loop {
@@ -137,12 +140,10 @@ impl<W> Core<W> for Core0<W>
                 };
 
                 *permission = com.data.0;
-                let receiver = com.data.1;
+                let mut receiver = com.data.1;
                 // Clear any previous program before loading the new one
                 prog.clear();
-                while let Ok(v) = receiver.recv() {
-                    prog.extend_from_slice(v.as_slice());
-                }
+                receiver.read_to_end(prog).expect("core0: Inception stream failed");
             }
 
             // Run until core is killed
@@ -153,9 +154,39 @@ impl<W> Core<W> for Core0<W>
                 // Execute instruction
                 match prog[usize::from(*pc)] {
                     // rread#
-                    x @ 0...3 => {
+                    x @ 0x00...0x03 => {
+                        let select = x as usize;
                         dstack.replace(|v| {
-                            data[usize::from(dcs[x as usize] + v)]
+                            data[usize::from(dcs[select] + v)]
+                        });
+                    },
+                    // add#
+                    x @ 0x04...0x07 => {
+                        let select = x as usize - 0x04;
+                        dstack.replace(|v| {
+                            let dc_val = data[usize::from(dcs[select])];
+                            let new = dc_val + v;
+                            let old_signs = (v.is_negative(), dc_val.is_negative());
+                            let new_sign = new < W::zero();
+                            *overflow = if old_signs.0 != old_signs.1 {
+                                false
+                            } else {
+                                new_sign != old_signs.0
+                            };
+                            *carry = old_signs.0 && old_signs.1 && !new_sign;
+                            new
+                        });
+                    },
+                    // inc
+                    0x08 => {
+                        dstack.replace(|v| {
+                            let new = v + W::one();
+                            let old_sign = v.is_negative();
+                            let new_sign = new.is_negative();
+                            // Going from positive to negative is overflow
+                            *overflow = !old_sign && new_sign;
+                            *carry = v == -W::one();
+                            new
                         });
                     },
                     // TODO: Add all instructions
