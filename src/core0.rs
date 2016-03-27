@@ -42,6 +42,12 @@ impl<W> DStack<W> where W: Copy {
     }
 }
 
+struct CStackElement<W> {
+    pc: W,
+    dcs: [W; 4],
+    interrupt: bool,
+}
+
 pub struct Core0<W> {
     permission: Permission,
     running: bool,
@@ -66,8 +72,8 @@ pub struct Core0<W> {
     // The channel that must be used to kill this core
     kill_channel: (SyncSender<Com<()>>, Receiver<Com<()>>),
 
-    // Set up stack
     dstack: DStack<W>,
+    cstack: Vec<CStackElement<W>>,
 }
 
 impl Core0<u32> {
@@ -91,6 +97,7 @@ impl Core0<u32> {
             kill_channel: sync_channel(0),
 
             dstack: DStack::default(),
+            cstack: Vec::new(),
         }
     }
 }
@@ -121,6 +128,7 @@ impl<W> Core<W> for Core0<W>
         assert_eq!(self.incoming_streams.len(), self.buses.len());
         // Get disjoint references so borrows can occur simultaneously
         let dstack = &mut self.dstack;
+        let cstack = &mut self.cstack;
         let data = &mut self.data;
         let prog = &mut self.program;
         let pc = &mut self.pc;
@@ -128,6 +136,7 @@ impl<W> Core<W> for Core0<W>
         let permission = &mut self.permission;
         let carry = &mut self.carry;
         let overflow = &mut self.overflow;
+        let interrupt = &mut self.interrupt;
 
         // Repeat loop of reinception perpetually
         loop {
@@ -185,9 +194,87 @@ impl<W> Core<W> for Core0<W>
                             let new_sign = new.is_negative();
                             // Going from positive to negative is overflow
                             *overflow = !old_sign && new_sign;
-                            *carry = v == -W::one();
+                            // If the new value wrapped back to zero we carry
+                            *carry = new == W::zero();
                             new
                         });
+                    },
+                    // dec
+                    0x09 => {
+                        dstack.replace(|v| {
+                            let new = v - W::one();
+                            let old_sign = v.is_negative();
+                            let new_sign = new.is_negative();
+                            // Going from negative to positive is overflow
+                            *overflow = old_sign && !new_sign;
+                            // If the original value is zero, decrementing borrows
+                            let borrow = v == W::zero();
+                            *carry = !borrow;
+                            new
+                        });
+                    },
+                    // carry
+                    0x0A => {
+                        if *carry {
+                            dstack.replace(|v| {
+                                let new = v + W::one();
+                                let old_sign = v.is_negative();
+                                let new_sign = new.is_negative();
+                                // Going from positive to negative is overflow
+                                *overflow = !old_sign && new_sign;
+                                // If the new value wrapped back to zero we carry
+                                *carry = new == W::zero();
+                                new
+                            });
+                        } else {
+                            *overflow = false;
+                            *carry = false;
+                        }
+                    },
+                    // borrow
+                    0x0B => {
+                        if *carry {
+                            *overflow = false;
+                            *carry = true;
+                        } else {
+                            dstack.replace(|v| {
+                                let new = v - W::one();
+                                let old_sign = v.is_negative();
+                                let new_sign = new.is_negative();
+                                // Going from negative to positive is overflow
+                                *overflow = old_sign && !new_sign;
+                                // If the original value is zero, decrementing borrows
+                                let borrow = v == W::zero();
+                                *carry = !borrow;
+                                new
+                            });
+                        }
+                    },
+                    // inv
+                    0x0C => {
+                        dstack.replace(|v| {
+                            !v
+                        });
+                    },
+                    // flush
+                    0x0D => {},
+                    // reads
+                    0x0E => {
+                        dstack.replace(|v| {
+                            data[usize::from(v)]
+                        });
+                    },
+                    // ret
+                    0x0F => {
+                        let elem = match cstack.pop() {
+                            Some(v) => v,
+                            None => panic!("core0: Tried to return with empty return stack"),
+                        };
+                        if elem.interrupt {
+                            *interrupt = true;
+                        }
+                        *pc = elem.pc;
+                        *dcs = elem.dcs;
                     },
                     // TODO: Add all instructions
                     _ => {},
