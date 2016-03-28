@@ -154,6 +154,7 @@ impl<W> Core<W> for Core0<W>
         let interrupt = &mut self.interrupt;
 
         let send_channel = &mut self.send_channel;
+        let incoming_streams = &mut self.incoming_streams;
 
         // Repeat loop of reinception perpetually
         loop {
@@ -320,6 +321,45 @@ impl<W> Core<W> for Core0<W>
                         // Add the values to the conveyor in the correct order
                         conveyor.push_front(usize::into(msg.bus));
                         conveyor.push_front(msg.data);
+                    },
+                    // in
+                    0x13 => {
+                        'outer: loop {
+                            use std::thread::yield_now;
+                            for (b, o) in buses.iter_mut().zip(incoming_streams.iter_mut()) {
+                                if b.enabled {
+                                    use std::sync::mpsc::TryRecvError::{Empty, Disconnected};
+                                    match o.try_recv() {
+                                        Ok(msg) => {
+                                            let mut read = msg.data;
+                                            let bus = usize::into(msg.bus);
+                                            dstack.replace(|v| {
+                                                use std::mem::{transmute, size_of};
+                                                let loc = usize::from(v);
+                                                match read.read_to_end(unsafe{transmute(&mut data[loc])}) {
+                                                    Ok(n) => {
+                                                        if n % size_of::<W>() != 0 {
+                                                            panic!("core0: Read was not aligned properly!");
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        panic!("core0: Unable to read to end on in: {}", e);
+                                                    },
+                                                }
+                                                bus
+                                            });
+                                            // Got a message successfully, so exit the loop
+                                            break 'outer;
+                                        },
+                                        Err(Empty) =>  {},
+                                        Err(Disconnected) =>  {
+                                            panic!("core0: Incoming streams channel closed");
+                                        },
+                                    }
+                                }
+                            }
+                            yield_now();
+                        }
                     },
                     // TODO: Add all instructions
                     _ => {},
