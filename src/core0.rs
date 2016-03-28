@@ -3,10 +3,12 @@ extern crate nue;
 use super::{Com, Core, SenderBus, Permission};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::io::Read;
+use std::collections::VecDeque;
 
 struct Bus<W> {
     sender: SenderBus<W>,
     selected: bool,
+    enabled: bool,
 }
 
 #[derive(Default)]
@@ -74,20 +76,23 @@ pub struct Core0<W> {
 
     dstack: DStack<W>,
     cstack: Vec<CStackElement<W>>,
+    conveyor: VecDeque<W>,
 }
 
-impl Core0<u32> {
-    fn new(memory: usize) -> Self {
+impl<W> Core0<W>
+    where W: num::PrimInt + Default
+{
+    pub fn new(memory: usize) -> Self {
         Core0{
             permission: Permission::default(),
             running: false,
-            pc: 0,
-            dcs: [0; 4],
+            pc: W::zero(),
+            dcs: [W::zero(); 4],
             carry: false,
             overflow: false,
             interrupt: false,
             program: Vec::new(),
-            data: vec![0; memory],
+            data: vec![W::zero(); memory],
 
             incoming_streams: Vec::new(),
             buses: Vec::new(),
@@ -98,17 +103,24 @@ impl Core0<u32> {
 
             dstack: DStack::default(),
             cstack: Vec::new(),
+            conveyor: {
+                use std::iter::repeat;
+                let mut v = VecDeque::new();
+                v.extend(repeat(W::zero()).take(16));
+                v
+            },
         }
     }
 }
 
 impl<W> Core<W> for Core0<W>
-    where W: Copy + num::PrimInt + num::Signed + nue::Decode + nue::Encode, usize: From<W>
+    where W: Copy + num::PrimInt + num::Signed + nue::Decode + nue::Encode, usize: From<W> + Into<W>
 {
     fn append_sender(&mut self, sender: SenderBus<W>) {
         self.buses.push(Bus{
             sender: sender,
             selected: false,
+            enabled: false,
         });
     }
 
@@ -127,8 +139,11 @@ impl<W> Core<W> for Core0<W>
     fn begin(&mut self) {
         assert_eq!(self.incoming_streams.len(), self.buses.len());
         // Get disjoint references so borrows can occur simultaneously
+        let running = &mut self.running;
         let dstack = &mut self.dstack;
         let cstack = &mut self.cstack;
+        let conveyor = &mut self.conveyor;
+        let buses = &mut self.buses;
         let data = &mut self.data;
         let prog = &mut self.program;
         let pc = &mut self.pc;
@@ -137,6 +152,8 @@ impl<W> Core<W> for Core0<W>
         let carry = &mut self.carry;
         let overflow = &mut self.overflow;
         let interrupt = &mut self.interrupt;
+
+        let send_channel = &mut self.send_channel;
 
         // Repeat loop of reinception perpetually
         loop {
@@ -153,6 +170,7 @@ impl<W> Core<W> for Core0<W>
                 // Clear any previous program before loading the new one
                 prog.clear();
                 receiver.read_to_end(prog).expect("core0: Inception stream failed");
+                *running = true;
             }
 
             // Run until core is killed
@@ -266,15 +284,48 @@ impl<W> Core<W> for Core0<W>
                     },
                     // ret
                     0x0F => {
-                        let elem = match cstack.pop() {
-                            Some(v) => v,
-                            None => panic!("core0: Tried to return with empty return stack"),
-                        };
+                        let elem = cstack.pop().expect("core0: Tried to return with empty return stack");
                         if elem.interrupt {
                             *interrupt = true;
                         }
                         *pc = elem.pc;
                         *dcs = elem.dcs;
+                    },
+                    // ien
+                    0x10 => {
+                        for bus in buses.iter_mut() {
+                            bus.enabled |= bus.selected;
+                        }
+                    },
+                    // idi
+                    0x11 => {
+                        for bus in buses.iter_mut() {
+                            bus.enabled = false;
+                        }
+                    },
+                    // recv
+                    0x12 => {
+                        let mut unaccepted = Vec::new();
+                        // Wait for an enabled interrupt (place the rest in a vec to send them back)
+                        let msg;
+                        loop {
+                            let v = send_channel.1.recv().expect("core0: Interrupt/send channel closed");
+                            if buses[v.bus].enabled {
+                                msg = v;
+                                break;
+                            }
+                            unaccepted.push(v);
+                        }
+                        // Remove 2 values from back of conveyor
+                        conveyor.pop_back();
+                        conveyor.pop_back();
+                        // Add the values to the conveyor in the correct order
+                        conveyor.push_front(usize::into(msg.bus));
+                        conveyor.push_front(msg.data);
+                        // Send unaccepted messages back
+                        for b in unaccepted {
+                            send_channel.0.send(b).expect("core0: Interrupt/send channel closed");
+                        }
                     },
                     // TODO: Add all instructions
                     _ => {},
