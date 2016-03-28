@@ -305,16 +305,14 @@ impl<W> Core<W> for Core0<W>
                     },
                     // recv
                     0x12 => {
-                        let mut unaccepted = Vec::new();
                         // Wait for an enabled interrupt (place the rest in a vec to send them back)
-                        let msg;
+                        let mut msg;
                         loop {
-                            let v = send_channel.1.recv().expect("core0: Interrupt/send channel closed");
-                            if buses[v.bus].enabled {
-                                msg = v;
+                            msg = send_channel.1.recv().expect("core0: Interrupt/send channel closed");
+                            if buses[msg.bus].enabled {
                                 break;
                             }
-                            unaccepted.push(v);
+                            // Drop any messages that arent enabled
                         }
                         // Remove 2 values from back of conveyor
                         conveyor.pop_back();
@@ -322,10 +320,6 @@ impl<W> Core<W> for Core0<W>
                         // Add the values to the conveyor in the correct order
                         conveyor.push_front(usize::into(msg.bus));
                         conveyor.push_front(msg.data);
-                        // Send unaccepted messages back
-                        for b in unaccepted {
-                            send_channel.0.send(b).expect("core0: Interrupt/send channel closed");
-                        }
                     },
                     // TODO: Add all instructions
                     _ => {},
